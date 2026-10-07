@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>MY Power - Driver</title>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#0f172a;color:white;min-height:100vh;display:flex;justify-content:center;align-items:center}.card{width:92%;max-width:400px;background:#1e293b;padding:25px;border-radius:20px;box-shadow:0 15px 40px rgba(0,0,0,.4)}h2{text-align:center}input{width:100%;padding:14px;margin-top:10px;border:0;border-radius:10px;background:#334155;color:white;font-size:16px}button{width:100%;padding:14px;margin-top:15px;border:0;border-radius:10px;font-size:16px;font-weight:bold;cursor:pointer}#loginBtn{background:#22c55e;color:white}#logoutBtn{background:#ef4444;color:white}.info{margin-top:20px;background:#0f172a;padding:15px;border-radius:12px}.note{margin-top:14px;font-size:12.5px;line-height:1.6;color:#94a3b8;text-align:center}#driverPanel{display:none}#message{margin-top:15px;text-align:center}
+</style>
+</head>
+<body>
+<div class="card">
+<div id="loginPanel">
+<h2>🚗 MY Power</h2>
+<input type="tel" id="phone" placeholder="ফোন নম্বর (যেমন: 01712345678)">
+<input type="password" id="password" placeholder="Password">
+<button id="loginBtn">Login</button>
+<div id="message"></div>
+</div>
+<div id="driverPanel">
+<h2>🚗 MY Power</h2>
+<div class="info" style="text-align:center;padding:30px 15px;">
+<div id="bigIcon" style="font-size:48px;margin-bottom:12px;">📍</div>
+<div id="status" style="font-size:17px;font-weight:bold;">চালু হচ্ছে...</div>
+</div>
+<button id="settingsBtn" style="display:none;background:#3b82f6;color:white;">⚙️ সেটিংস খুলুন</button>
+<button id="retryBtn" style="display:none;background:#f59e0b;color:#1A1200;">📍 আবার চেষ্টা করুন</button>
+<div class="note">স্ক্রিন বন্ধ থাকলেও লোকেশন যাবে।<br>লোকেশন পারমিশনে <b>"সবসময় অনুমতি" (Allow all the time)</b> দিন।</div>
+<button id="logoutBtn">Logout</button>
+</div>
+</div>
+<script>
+const firebaseConfig={
+apiKey:"AIzaSyBuu25ZYUGJWiayqzMTUavodF-rcMVFrCk",
+authDomain:"t-eran-2d426.firebaseapp.com",
+databaseURL:"https://t-eran-2d426-default-rtdb.asia-southeast1.firebasedatabase.app",
+projectId:"t-eran-2d426",
+storageBucket:"t-eran-2d426.firebasestorage.app",
+messagingSenderId:"256100312636",
+appId:"1:256100312636:web:5e2d234a8b9ffff2e20539",
+measurementId:"G-PMC6W971RS"
+};
+firebase.initializeApp(firebaseConfig);
+const auth=firebase.auth(),db=firebase.database();
+
+let watchId=null,currentUser=null,latestBattery=null,started=false;
+let lastLiveAt=0,lastHistoryAt=0,lastPos=null;
+
+const isNative=!!(window.Capacitor&&Capacitor.isNativePlatform&&Capacitor.isNativePlatform());
+const BG=(window.Capacitor&&Capacitor.registerPlugin)?Capacitor.registerPlugin("BackgroundGeolocation"):null;
+
+const loginPanel=document.getElementById("loginPanel");
+const driverPanel=document.getElementById("driverPanel");
+const message=document.getElementById("message");
+const bigIcon=document.getElementById("bigIcon");
+const statusEl=document.getElementById("status");
+const retryBtn=document.getElementById("retryBtn");
+const settingsBtn=document.getElementById("settingsBtn");
+
+function setStatus(icon,text){bigIcon.innerText=icon;statusEl.innerText=text}
+
+if(navigator.getBattery){
+navigator.getBattery().then(battery=>{
+function refreshBattery(){ latestBattery=Math.round(battery.level*100); }
+refreshBattery();
+battery.addEventListener('levelchange',refreshBattery);
+battery.addEventListener('chargingchange',refreshBattery);
+}).catch(()=>{});
+}
+
+// আগে লগইন করা থাকলে অ্যাপ খুললেই নিজে থেকে চালু হবে
+auth.onAuthStateChanged(user=>{
+if(user&&!started){
+started=true;
+currentUser=user;
+loginPanel.style.display="none";
+driverPanel.style.display="block";
+loadDriverProfile();
+}
+});
+
+document.getElementById("loginBtn").addEventListener("click",async()=>{
+const phoneRaw=document.getElementById("phone").value.trim();
+const password=document.getElementById("password").value;
+if(!phoneRaw||!password){message.innerText="ফোন নম্বর এবং Password দিন";return}
+const phoneDigits=phoneRaw.replace(/\D/g,"");
+if(phoneDigits.length<8){message.innerText="সঠিক ফোন নম্বর দিন";return}
+const email=phoneDigits+"@teran.app";
+try{
+message.innerText="Login হচ্ছে...";
+await auth.signInWithEmailAndPassword(email,password);
+}catch(error){
+console.log(error);
+message.innerText="❌ ফোন নম্বর অথবা Password ভুল ("+(error.code||"")+")";
+}
+});
+
+async function loadDriverProfile(){
+const uid=currentUser.uid;
+try{
+const snapshot=await db.ref("drivers/"+uid).once("value");
+if(!snapshot.val()){
+alert("এই Driver-এর profile পাওয়া যায়নি। ম্যানেজারকে জানান।");
+await auth.signOut(); location.reload(); return;
+}
+startLocation();
+}catch(error){
+console.log(error);
+setStatus("❌","প্রোফাইল পড়া যায়নি: "+error.message);
+}
+}
+
+function stopLocation(){
+if(watchId===null)return;
+try{
+if(isNative&&BG){BG.removeWatcher({id:watchId})}
+else{navigator.geolocation.clearWatch(watchId)}
+}catch(e){console.log(e)}
+watchId=null;
+}
+
+async function startLocation(){
+stopLocation();
+retryBtn.style.display="none";
+settingsBtn.style.display="none";
+setStatus("📍","লোকেশন চালু হচ্ছে...");
+
+if(isNative&&BG){
+try{
+watchId=await BG.addWatcher({
+backgroundTitle:"MY Power",
+backgroundMessage:"আপনার লোকেশন শেয়ার হচ্ছে",
+requestPermissions:true,
+stale:false,
+distanceFilter:0
+},(location,error)=>{
+if(error){
+console.log(error);
+if(error.code==="NOT_AUTHORIZED"){
+setStatus("⚠️","লোকেশন পারমিশনে 'সবসময় অনুমতি' (Allow all the time) দিন");
+settingsBtn.style.display="block";
+}else{
+setStatus("⚠️","লোকেশন পাওয়া যাচ্ছে না, GPS অন করুন");
+}
+retryBtn.style.display="block";
+return;
+}
+updateLocation({coords:{
+latitude:location.latitude,
+longitude:location.longitude,
+speed:location.speed,
+heading:location.bearing,
+accuracy:location.accuracy
+}});
+});
+}catch(e){
+console.log(e);
+setStatus("❌","লোকেশন চালু করা যায়নি: "+(e.message||e));
+retryBtn.style.display="block";
+}
+return;
+}
+
+// অ্যাপের বাইরে (ব্রাউজারে) খুললে সাধারণ GPS
+if(!navigator.geolocation){setStatus("❌","এই ফোনে লোকেশন সাপোর্ট নেই");return}
+watchId=navigator.geolocation.watchPosition(
+p=>updateLocation(p),
+e=>{
+console.log(e);
+setStatus("⚠️",e.code===1?"লোকেশন পারমিশন দিন":"লোকেশন অন করুন");
+retryBtn.style.display="block";
+},
+{enableHighAccuracy:true,maximumAge:5000,timeout:30000}
+);
+}
+
+async function updateLocation(position,force){
+if(!currentUser)return;
+lastPos=position;
+const now=Date.now();
+// প্রতি ৩ সেকেন্ডের বেশি ঘন ঘন পাঠানো হবে না (ডেটা ও ব্যাটারি বাঁচাতে)
+if(!force&&now-lastLiveAt<3000)return;
+lastLiveAt=now;
+
+const uid=currentUser.uid;
+const latitude=position.coords.latitude;
+const longitude=position.coords.longitude;
+let speed=position.coords.speed;
+if(force||speed===null||speed===undefined||isNaN(speed)||speed<0)speed=0;
+else speed*=3.6;
+let heading=position.coords.heading;
+if(heading===null||heading===undefined||isNaN(heading))heading=0;
+const accuracy=position.coords.accuracy||0;
+const status=speed<1?"stopped":"moving";
+
+const liveData={
+lat:latitude,lng:longitude,
+speed:Number(speed.toFixed(1)),
+heading:Number(heading.toFixed(0)),
+accuracy:Number(accuracy.toFixed(1)),
+status:status,updatedAt:now
+};
+if(latestBattery!==null) liveData.battery=latestBattery;
+
+try{
+await db.ref("liveDrivers/"+uid).set(liveData);
+if(!force&&now-lastHistoryAt>=5000){
+lastHistoryAt=now;
+await db.ref("tripHistory/"+uid).push({
+lat:latitude,lng:longitude,
+speed:Number(speed.toFixed(1)),
+heading:Number(heading.toFixed(0)),
+timestamp:now
+});
+}
+}catch(err){
+console.error(err);
+setStatus("❌","সার্ভারে পাঠানো যায়নি: "+err.message);
+return;
+}
+
+retryBtn.style.display="none";
+settingsBtn.style.display="none";
+setStatus(status==="moving"?"🟢":"🟡",status==="moving"?"লোকেশন পাঠানো হচ্ছে":"অবস্থান করছে (লাইভ)");
+}
+
+// গাড়ি থেমে থাকলেও ম্যানেজার যেন "লাইভ" দেখে, তাই ৩০ সেকেন্ডে একবার শেষ অবস্থান আবার পাঠানো হয়
+setInterval(()=>{
+if(currentUser&&lastPos&&Date.now()-lastLiveAt>30000){updateLocation(lastPos,true)}
+},15000);
+
+retryBtn.addEventListener("click",()=>startLocation());
+settingsBtn.addEventListener("click",()=>{
+if(BG&&BG.openSettings)BG.openSettings();
+});
+
+document.getElementById("logoutBtn").addEventListener("click",async()=>{
+stopLocation();
+try{
+if(currentUser)await db.ref("liveDrivers/"+currentUser.uid).update({status:"offline",updatedAt:0});
+}catch(e){console.log(e)}
+await auth.signOut();location.reload();
+});
+</script>
+</body>
+</html>
