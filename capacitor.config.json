@@ -1,0 +1,8 @@
+{
+  "appId": "com.mypower.driver",
+  "appName": "MY Power Driver",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  }
+}
