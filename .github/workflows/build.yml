@@ -1,0 +1,74 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install packages
+        run: npm install --legacy-peer-deps
+
+      - name: Add Android project
+        run: npx cap add android
+
+      - name: Add location permissions
+        run: |
+          python3 - <<'PY'
+          p = 'android/app/src/main/AndroidManifest.xml'
+          s = open(p, encoding='utf-8').read()
+          perms = [
+              'INTERNET',
+              'ACCESS_COARSE_LOCATION',
+              'ACCESS_FINE_LOCATION',
+              'ACCESS_BACKGROUND_LOCATION',
+              'FOREGROUND_SERVICE',
+              'FOREGROUND_SERVICE_LOCATION',
+              'POST_NOTIFICATIONS',
+              'WAKE_LOCK',
+          ]
+          add = ''
+          for x in perms:
+              name = 'android.permission.' + x
+              if name not in s:
+                  add += '    <uses-permission android:name="' + name + '" />\n'
+          s = s.replace('</manifest>', add + '</manifest>')
+          open(p, 'w', encoding='utf-8').write(s)
+          PY
+
+      - name: Sync
+        run: npx cap sync android
+
+      - name: Build APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk MyPower-Driver.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: app-${{ github.run_number }}
+          name: MY Power Driver ${{ github.run_number }}
+          files: MyPower-Driver.apk
