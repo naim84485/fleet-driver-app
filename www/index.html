@@ -28,8 +28,7 @@
 </div>
 <button id="settingsBtn" style="display:none;background:#3b82f6;color:white;">⚙️ সেটিংস খুলুন</button>
 <button id="retryBtn" style="display:none;background:#f59e0b;color:#1A1200;">📍 আবার চেষ্টা করুন</button>
-<div class="note">স্ক্রিন বন্ধ থাকলেও লোকেশন যাবে।<br>লোকেশন পারমিশনে <b>"সবসময় অনুমতি" (Allow all the time)</b> দিন।</div>
-<button id="logoutBtn">Logout</button>
+<div class="note">স্ক্রিন বন্ধ থাকলেও লোকেশন যাবে।<br>লোকেশন বন্ধ করলে ফোনে সতর্কতা আসবে।<br>লোকেশন পারমিশনে <b>"সবসময় অনুমতি" (Allow all the time)</b> দিন।</div>
 </div>
 </div>
 <script>
@@ -47,10 +46,39 @@ firebase.initializeApp(firebaseConfig);
 const auth=firebase.auth(),db=firebase.database();
 
 let watchId=null,currentUser=null,latestBattery=null,started=false;
-let lastLiveAt=0,lastHistoryAt=0,lastPos=null;
+let lastLiveAt=0,lastHistoryAt=0,lastPos=null,lastFixAt=0,trackStartAt=0,gpsWarned=false;
 
 const isNative=!!(window.Capacitor&&Capacitor.isNativePlatform&&Capacitor.isNativePlatform());
 const BG=(window.Capacitor&&Capacitor.registerPlugin)?Capacitor.registerPlugin("BackgroundGeolocation"):null;
+
+const LN=(window.Capacitor&&((Capacitor.Plugins&&Capacitor.Plugins.LocalNotifications)||(Capacitor.registerPlugin&&Capacitor.registerPlugin("LocalNotifications"))))||null;
+let lastArmAt=0,lastNagAt=0;
+
+async function setupAlerts(){
+if(!isNative||!LN)return;
+try{
+await LN.requestPermissions();
+await LN.createChannel({id:"gps_alert",name:"GPS সতর্কতা",description:"লোকেশন বন্ধ হলে সতর্কতা",importance:5,visibility:1,vibration:true});
+}catch(e){console.log(e)}
+}
+// প্রতিবার সত্যিকারের GPS সিগন্যাল এলে সতর্কতা ৪৫ সেকেন্ড পিছিয়ে দেওয়া হয়।
+// সিগন্যাল বন্ধ হলে সময় শেষে ফোন নিজেই নোটিফিকেশন দেয় ও কাঁপে (অ্যাপ বন্ধ থাকলেও)
+async function armAlert(delayMs){
+if(!isNative||!LN)return;
+try{
+await LN.schedule({notifications:[{
+id:1001,
+title:"⚠️ লোকেশন বন্ধ!",
+body:"আপনার ফোনের লোকেশন (GPS) চালু করুন",
+channelId:"gps_alert",
+schedule:{at:new Date(Date.now()+delayMs),allowWhileIdle:true}
+}]});
+}catch(e){console.log(e)}
+}
+async function clearAlert(){
+if(!isNative||!LN)return;
+try{await LN.removeAllDeliveredNotifications()}catch(e){}
+}
 
 const loginPanel=document.getElementById("loginPanel");
 const driverPanel=document.getElementById("driverPanel");
@@ -106,6 +134,7 @@ if(!snapshot.val()){
 alert("এই Driver-এর profile পাওয়া যায়নি। ম্যানেজারকে জানান।");
 await auth.signOut(); location.reload(); return;
 }
+await setupAlerts();
 startLocation();
 }catch(error){
 console.log(error);
@@ -124,6 +153,7 @@ watchId=null;
 
 async function startLocation(){
 stopLocation();
+trackStartAt=Date.now();
 retryBtn.style.display="none";
 settingsBtn.style.display="none";
 setStatus("📍","লোকেশন চালু হচ্ছে...");
@@ -181,6 +211,11 @@ async function updateLocation(position,force){
 if(!currentUser)return;
 lastPos=position;
 const now=Date.now();
+if(!force){
+lastFixAt=now;
+if(gpsWarned){gpsWarned=false;clearAlert()}
+if(now-lastArmAt>10000){lastArmAt=now;armAlert(45000)}
+}
 // প্রতি ৩ সেকেন্ডের বেশি ঘন ঘন পাঠানো হবে না (ডেটা ও ব্যাটারি বাঁচাতে)
 if(!force&&now-lastLiveAt<3000)return;
 lastLiveAt=now;
@@ -229,21 +264,30 @@ setStatus(status==="moving"?"🟢":"🟡",status==="moving"?"লোকেশন 
 
 // গাড়ি থেমে থাকলেও ম্যানেজার যেন "লাইভ" দেখে, তাই ৩০ সেকেন্ডে একবার শেষ অবস্থান আবার পাঠানো হয়
 setInterval(()=>{
-if(currentUser&&lastPos&&Date.now()-lastLiveAt>30000){updateLocation(lastPos,true)}
+// শুধু তখনই, যখন সম্প্রতি সত্যিকারের GPS সিগন্যাল এসেছে
+if(currentUser&&lastPos&&Date.now()-lastFixAt<60000&&Date.now()-lastLiveAt>30000){updateLocation(lastPos,true)}
 },15000);
+
+// GPS বন্ধ বা সিগন্যাল না থাকলে ড্রাইভারকে সতর্ক করা ও ম্যানেজারকে জানানো
+setInterval(async()=>{
+if(!currentUser||watchId===null)return;
+const silentMs=Date.now()-Math.max(lastFixAt,trackStartAt);
+if(silentMs<20000)return;
+setStatus("📵","GPS সিগন্যাল নেই! ফোনের লোকেশন (GPS) অন করুন");
+retryBtn.style.display="block";
+try{if(navigator.vibrate)navigator.vibrate([300,150,300])}catch(e){}
+if(Date.now()-lastNagAt>60000){lastNagAt=Date.now();armAlert(1000)}
+if(!gpsWarned){
+gpsWarned=true;
+try{await db.ref("liveDrivers/"+currentUser.uid).update({gpsOff:true,gpsOffAt:Date.now()})}catch(e){console.log(e)}
+}
+},5000);
 
 retryBtn.addEventListener("click",()=>startLocation());
 settingsBtn.addEventListener("click",()=>{
 if(BG&&BG.openSettings)BG.openSettings();
 });
 
-document.getElementById("logoutBtn").addEventListener("click",async()=>{
-stopLocation();
-try{
-if(currentUser)await db.ref("liveDrivers/"+currentUser.uid).update({status:"offline",updatedAt:0});
-}catch(e){console.log(e)}
-await auth.signOut();location.reload();
-});
 </script>
 </body>
 </html>
