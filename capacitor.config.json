@@ -3,6 +3,9 @@
   "appName": "MY Power",
   "webDir": "www",
   "server": {
-    "androidScheme": "https"
+    "url": "https://naim84485.github.io/fleet-tracker/app.html",
+    "androidScheme": "https",
+    "allowNavigation": ["naim84485.github.io"],
+    "cleartext": false
   }
 }
